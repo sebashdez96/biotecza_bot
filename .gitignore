@@ -1,0 +1,19 @@
+# --- RUST ---
+# Ignora la carpeta de compilación (es enorme y no se necesita en Git)
+/target/
+
+# --- SEGURIDAD (CRÍTICO) ---
+# Jamás subas tus tokens ni credenciales
+.env
+.env.local
+.env.*.local
+
+# --- ARCHIVOS DE SISTEMA / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- LOGS ---
+*.log
+npm-debug.log*
