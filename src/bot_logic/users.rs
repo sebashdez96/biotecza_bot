@@ -1,25 +1,44 @@
 use sqlx::PgPool;
-use crate::whatsapp;
+use crate::{database, whatsapp};
 use super::states::UserState;
-use regex::Regex;
+use uuid::Uuid;
 
 pub async fn enviar_bienvenida(pool: &PgPool, telefono: &str) {
-    crate::database::cambiar_estado(pool, telefono, &UserState::Inicio.to_string()).await;
+    database::cambiar_estado(pool, telefono, "INICIO").await;
 
-    // Intentar obtener usuario y personalizar saludo si ya tiene nombre
-    if let Some(u) = crate::database::obtener_usuario_por_telefono(pool, telefono).await {
+    let mut nombre_saludo = "".to_string();
+    if let Some(u) = database::obtener_usuario_por_telefono(pool, telefono).await {
         if !u.first_name.trim().is_empty() {
-            let mensaje = format!("¡Hola, {}! Bienvenido a *Biotecza*.\nSelecciona una opción:", u.first_name);
-            whatsapp::enviar_botones(telefono, &mensaje, vec!["Laboratorio", "Medicamentos"]).await;
-            return;
+            nombre_saludo = format!(", {}", u.first_name);
         }
     }
 
-    whatsapp::enviar_botones(
-        telefono,
-        "¡Hola! Bienvenido a *Biotecza*.\nSelecciona una opción:",
-        vec!["Laboratorio", "Medicamentos"]
-    ).await;
+    let mensaje = format!("¡Hola{}! Bienvenido a *Biotecza*.\nSelecciona una opción:", nombre_saludo);
+    whatsapp::enviar_botones(telefono, &mensaje, vec!["Laboratorio", "Medicamentos"]).await;
+}
+
+pub async fn verificar_y_enviar_bienvenida(pool: &PgPool, telefono: &str) {
+    if let Some(paciente) = database::obtener_patient_id_por_telefono(pool, telefono).await {
+        let hay_orden_farmacia = database::obtener_orden_farmacia_pendiente(pool, paciente.patient_id).await.is_some();
+        let hay_orden_lab = database::obtener_orden_lab_pendiente(pool, paciente.patient_id).await.is_some();
+
+        if hay_orden_farmacia || hay_orden_lab {
+            let tipo_pedido = if hay_orden_farmacia { "medicamentos" } else { "análisis de laboratorio" };
+            
+            let mut nombre_saludo = "".to_string();
+            if let Some(u) = database::obtener_usuario_por_telefono(pool, telefono).await {
+                if !u.first_name.trim().is_empty() {
+                    nombre_saludo = format!(", {}", u.first_name);
+                }
+            }
+
+            let mensaje = format!("¡Hola{}!\n\nTienes un pedido de {} en proceso. ¿Qué deseas hacer?", nombre_saludo, tipo_pedido);
+            database::cambiar_estado(pool, telefono, "INICIO").await;
+            whatsapp::enviar_botones(telefono, &mensaje, vec!["Continuar pedido", "Pedido nuevo", "Cancelar"]).await;
+            return;
+        }
+    }
+    enviar_bienvenida(pool, telefono).await;
 }
 
 pub async fn procesar_usuario(
@@ -27,94 +46,42 @@ pub async fn procesar_usuario(
     telefono: &str,
     entrada: &str,
     estado: UserState,
-    user_id: &uuid::Uuid,
-    patient_id: &uuid::Uuid,
+    user_id: &Uuid,
+    patient_id: &Uuid,
 ) -> bool {
     match estado {
+        // Este estado se activa si el usuario viene de confirmar un carrito
         UserState::ConfirmandoPedido => {
             if entrada == "Confirmar Pedido" {
-                crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoPrimerNombre.to_string()).await;
-                whatsapp::enviar_texto(telefono, "¡Excelente! ¿Cuál es tu *nombre*?").await;
+                // Aquí podrías pedir el CP antes de lanzar el Flow
+                database::cambiar_estado(pool, telefono, "VALIDANDO_CP").await;
+                whatsapp::enviar_texto(telefono, "📍 Para verificar la entrega, por favor escribe tu *Código Postal*:").await;
             } else {
                 enviar_bienvenida(pool, telefono).await;
             }
             true
         },
 
-        UserState::EsperandoPrimerNombre => {
-            // Guardar el nombre (first_name)
-            let _ = sqlx::query!("UPDATE users SET first_name = $1 WHERE user_id = $2", entrada, user_id)
-                .execute(pool).await;
-
-            crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoApellidoPaterno.to_string()).await;
-            whatsapp::enviar_texto(telefono, "Gracias. ¿Cuál es tu *apellido paterno*?").await;
-            true
-        },
-
-        UserState::EsperandoApellidoPaterno => {
-            // Guardar apellido paterno en paternal_last_name
-            let _ = sqlx::query!("UPDATE users SET paternal_last_name = $1 WHERE user_id = $2", entrada, user_id)
-                .execute(pool).await;
-
-            crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoApellidoMaterno.to_string()).await;
-            whatsapp::enviar_texto(telefono, "Ahora, ¿cuál es tu *apellido materno*? (o responde '-' si no aplica)").await;
-            true
-        },
-
-        UserState::EsperandoApellidoMaterno => {
-            // Si no aplica, se puede enviar '-' para omitir
-            if entrada.trim() != "-" {
-                // Guardar apellido materno en maternal_last_name
-                let _ = sqlx::query!("UPDATE users SET maternal_last_name = $1 WHERE user_id = $2", entrada, user_id)
-                    .execute(pool).await;
-            }
-
-            crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoEmail.to_string()).await;
-            // Obtener first_name para el saludo
-            if let Some(u) = crate::database::obtener_usuario_por_telefono(pool, telefono).await {
-                whatsapp::enviar_texto(telefono, &format!("Mucho gusto, {}. ¿Cuál es tu *correo*?", u.first_name)).await;
+        // Aquí recibimos el JSON del Flow parseado
+        UserState::EsperandoReceta => { // O el nombre que le hayas dado al estado del Flow
+            // Intentamos parsear la entrada (que debería ser un JSON String)
+            if let Ok(datos_json) = serde_json::from_str::<serde_json::Value>(entrada) {
+                match database::finalizar_pedido_con_datos_flow(pool, patient_id, user_id, &datos_json).await {
+                    Ok(_) => {
+                        whatsapp::enviar_texto(
+                            telefono, 
+                            "✅ *¡Pedido registrado!*\n\nHemos guardado tus datos de entrega. Un asesor te contactará pronto. ¡Gracias!"
+                        ).await;
+                        database::cambiar_estado(pool, telefono, "INICIO").await;
+                    },
+                    Err(e) => {
+                        eprintln!("Error al guardar flow: {:?}", e);
+                        whatsapp::enviar_texto(telefono, "❌ Hubo un error al guardar tus datos. Intenta de nuevo.").await;
+                    }
+                }
             } else {
-                whatsapp::enviar_texto(telefono, "¿Cuál es tu *correo*?").await;
+                whatsapp::enviar_texto(telefono, "⚠️ Error al procesar el formulario. Intenta de nuevo.").await;
             }
-            true
-        },
-
-        UserState::EsperandoEmail => {
-            let email = entrada.trim();
-            // Expresión regular simple para validar formato básico de email
-            let re = Regex::new(r"(?i)^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
-            if re.is_match(email) {
-                crate::database::actualizar_email_usuario(pool, *user_id, email).await;
-                crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoCurp.to_string()).await;
-                whatsapp::enviar_texto(telefono, "Gracias. Ahora ingresa tu *CURP* (18 caracteres):").await;
-            } else {
-                whatsapp::enviar_texto(telefono, "❌ Formato de correo inválido. Por favor ingresa un correo válido:").await;
-            }
-            true
-        },
-
-        UserState::EsperandoCurp => {
-            if entrada.len() == 18 {
-                sqlx::query!("UPDATE patients SET curp = $1 WHERE patient_id = $2", entrada, patient_id).execute(pool).await.ok();
-                crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoGenero.to_string()).await;
-                whatsapp::enviar_botones(telefono, "¿Cuál es tu género?", vec!["M", "F"]).await;
-            } else {
-                whatsapp::enviar_texto(telefono, "❌ CURP inválido. Inténtalo de nuevo:").await;
-            }
-            true
-        },
-
-        UserState::EsperandoGenero => {
-            sqlx::query!("UPDATE patients SET gender = $1 WHERE patient_id = $2", entrada, patient_id).execute(pool).await.ok();
-            crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoDireccion.to_string()).await;
-            whatsapp::enviar_texto(telefono, "📍 ¿Cuál es la *dirección completa*?").await;
-            true
-        },
-
-        UserState::EsperandoDireccion => {
-            crate::database::guardar_direccion_paciente(pool, *patient_id, entrada).await;
-            crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoReceta.to_string()).await;
-            whatsapp::enviar_texto(telefono, "✅ ¡Listo! Ahora envía la *foto de tu receta médica*.").await;
             true
         },
 

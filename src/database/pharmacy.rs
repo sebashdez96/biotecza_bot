@@ -3,12 +3,13 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 use crate::bot_logic::models::Medication;
 
-pub async fn obtener_categorias(pool: &PgPool) -> Vec<String> {
-    sqlx::query!("SELECT DISTINCT category::text as cat FROM medications WHERE category IS NOT NULL")
-        .fetch_all(pool).await
-        .map(|rows| rows.into_iter().filter_map(|r| r.cat).collect())
-        .unwrap_or_default()
+
+pub struct InfoPostal {
+    pub municipio: String,
+    pub estado: String,
+    pub colonias: Vec<serde_json::Value>, // Para el data-source del Flow
 }
+
 
 #[allow(dead_code)]
 pub async fn buscar_productos_categoria(pool: &PgPool, categoria: &str) -> Vec<(String, String, Option<String>, Decimal)> {
@@ -59,26 +60,43 @@ pub async fn agregar_al_carrito(pool: &PgPool, order_id: Uuid, med_id: Uuid, pre
 }
 
 pub async fn obtener_o_crear_orden(pool: &PgPool, patient_id: Uuid) -> Uuid {
+    // Buscamos una orden donde la parte de farmacia esté EXACTAMENTE en 'solicitado'
+    // Si está en 'preparando', 'en_ruta' o 'cancelado', esta consulta devolverá None.
     let orden = sqlx::query_scalar!(
-        "SELECT order_id FROM orders WHERE patient_id = $1 AND p_status = 'pendiente' LIMIT 1",
+        r#"
+        SELECT o.order_id 
+        FROM orders o
+        JOIN medication_orders mo ON o.order_id = mo.order_id
+        WHERE o.patient_id = $1 
+          AND o.p_status = 'pendiente' 
+          AND mo.current_status = 'solicitado'::med_status
+        LIMIT 1
+        "#,
         patient_id
     ).fetch_optional(pool).await.unwrap_or(None);
 
     if let Some(id) = orden { 
+        // Si encontramos una en 'solicitado', la reutilizamos
         id 
     } else {
+        // Si no hay ninguna en 'solicitado', creamos una NUEVA orden
+        // Esto garantiza que si el usuario ya tiene una 'en_ruta', 
+        // lo que pida ahora sea un pedido separado.
         let new_id = sqlx::query_scalar!(
-            "INSERT INTO orders (patient_id, order_type, total_amount, p_method) 
-             VALUES ($1, 'medication', 0.00, 'efectivo') RETURNING order_id",
+            "INSERT INTO orders (patient_id, order_type, total_amount, p_method, p_status) 
+             VALUES ($1, 'medication', 0.00, 'efectivo', 'pendiente') RETURNING order_id",
             patient_id
         ).fetch_one(pool).await.unwrap();
         
-        let _ = sqlx::query!("INSERT INTO medication_orders (order_id, delivery_address) VALUES ($1, 'Por definir')", new_id)
-            .execute(pool).await;
+        let _ = sqlx::query!(
+            "INSERT INTO medication_orders (order_id, delivery_address, current_status) 
+             VALUES ($1, 'Por definir', 'solicitado')", 
+            new_id
+        ).execute(pool).await;
+
         new_id
     }
 }
-
 pub async fn obtener_resumen_carrito(pool: &PgPool, order_id: Uuid) -> Vec<(String, i32, Decimal)> {
     sqlx::query_as::<sqlx::Postgres, (String, i32, Decimal)>(
         "SELECT m.brand_name, mi.quantity, mi.unit_price 
@@ -118,4 +136,150 @@ pub async fn buscar_medicamentos_similares(pool: &PgPool, query: &str) -> Vec<(S
     .fetch_all(pool)
     .await
     .unwrap_or_default()
+}
+
+pub async fn cancelar_pedido_farmacia(pool: &PgPool, patient_id: Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // 1. Obtenemos el ID de la orden ANTES de cambiar nada para asegurar el tiro
+    let order_id = sqlx::query_scalar!(
+        r#"
+        SELECT o.order_id 
+        FROM orders o
+        JOIN medication_orders mo ON o.order_id = mo.order_id
+        WHERE o.patient_id = $1 
+          AND o.p_status = 'pendiente' 
+          AND mo.current_status = 'solicitado'::med_status
+        LIMIT 1
+        "#,
+        patient_id
+    ).fetch_optional(&mut *tx).await?;
+
+    if let Some(oid) = order_id {
+        // 2. Borramos los items primero (para evitar conflictos de FK si existieran)
+        sqlx::query!(
+            "DELETE FROM medication_items WHERE order_id = $1",
+            oid
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // 3. Actualizamos la orden de farmacia a cancelado
+        sqlx::query!(
+            "UPDATE medication_orders SET current_status = 'cancelado' WHERE order_id = $1",
+            oid
+        )
+        .execute(&mut *tx)
+        .await?;
+        
+        // 4. Resetear el total de la orden principal a 0
+        sqlx::query!(
+            "UPDATE orders SET total_amount = 0 WHERE order_id = $1",
+            oid
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+
+/// Verifica si hay una orden de medicamentos pendiente para un paciente.
+/// Retorna Some(order_id) si existe una orden de medicamentos que no esté cancelada, None en caso contrario.
+pub async fn obtener_orden_farmacia_pendiente(pool: &PgPool, patient_id: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT mo.order_id 
+        FROM medication_orders mo
+        JOIN orders o ON mo.order_id = o.order_id
+        WHERE o.patient_id = $1 AND mo.current_status::text != 'cancelado'
+        LIMIT 1
+        "#,
+        patient_id
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+
+/// Guarda el término que el usuario escribió para buscar
+pub async fn guardar_ultimo_termino_busqueda(pool: &PgPool, telefono: &str, termino: &str) {
+    let _ = sqlx::query!(
+        "UPDATE user_sessions SET last_search_term = $1, ultima_actualizacion = CURRENT_TIMESTAMP WHERE telefono_whatsapp = $2",
+        termino, telefono
+    ).execute(pool).await;
+}
+
+/// Recupera el término para volver a ejecutar la búsqueda internamente
+pub async fn obtener_ultimo_termino_busqueda(pool: &PgPool, telefono: &str) -> Option<String> {
+    sqlx::query_scalar!(
+        "SELECT last_search_term FROM user_sessions WHERE telefono_whatsapp = $1", 
+        telefono
+    )
+    .fetch_optional(pool).await.ok().flatten().flatten()
+}
+
+/// Guarda el nombre del medicamento que el usuario eligió de la lista numérica
+pub async fn guardar_producto_seleccionado(pool: &PgPool, telefono: &str, nombre_med: &str) {
+    let _ = sqlx::query!(
+        "UPDATE user_sessions SET selected_product_name = $1, ultima_actualizacion = CURRENT_TIMESTAMP WHERE telefono_whatsapp = $2",
+        nombre_med, telefono
+    ).execute(pool).await;
+}
+
+/// Recupera el nombre del producto para agregarlo finalmente al carrito
+pub async fn obtener_producto_seleccionado(pool: &PgPool, telefono: &str) -> Option<String> {
+    sqlx::query_scalar!(
+        "SELECT selected_product_name FROM user_sessions WHERE telefono_whatsapp = $1", 
+        telefono
+    )
+    .fetch_optional(pool).await.ok().flatten().flatten()
+}
+
+pub async fn aplicar_costo_envio_db(pool: &PgPool, order_id: Uuid) {
+    let _ = sqlx::query!(
+        "UPDATE orders SET total_amount = total_amount + 20.00 WHERE order_id = $1",
+        order_id
+    ).execute(pool).await;
+}
+
+
+pub async fn obtener_info_por_cp(pool: &PgPool, cp_usuario: &str) -> Option<InfoPostal> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT colonia, municipio, estado 
+        FROM cobertura_postal 
+        WHERE cp = $1 AND tiene_cobertura = TRUE
+        "#,
+        cp_usuario
+    )
+    .fetch_all(pool)
+    .await
+    .ok()?;
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Tomamos municipio y estado del primer resultado (son iguales para el mismo CP)
+    let municipio = rows[0].municipio.clone();
+    let estado = rows[0].estado.clone();
+
+    // Mapeamos las colonias al formato que espera el Flow { "id": "...", "title": "..." }
+    let colonias = rows.iter().map(|r| {
+        serde_json::json!({
+            "id": r.colonia,
+            "title": r.colonia
+        })
+    }).collect();
+
+    Some(InfoPostal {
+        municipio,
+        estado,
+        colonias,
+    })
 }

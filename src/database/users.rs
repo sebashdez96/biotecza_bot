@@ -10,6 +10,7 @@ pub struct UserContext<'a> {
     pub user_id: Option<Uuid>,
 }
 
+
 impl<'a> UserContext<'a> {
     pub fn new(pool: &'a PgPool, phone: &str) -> Self {
         UserContext { pool, phone: phone.to_string(), user_id: None }
@@ -219,4 +220,70 @@ pub async fn guardar_receta_orden(pool: &PgPool, patient_id: Uuid, media_id: &st
          AND orders.p_status = 'pendiente'",
         media_id, patient_id
     ).execute(pool).await;
+}
+
+
+pub async fn finalizar_pedido_con_datos_flow(
+    pool: &sqlx::PgPool,
+    p_id: &uuid::Uuid,
+    u_id: &uuid::Uuid,
+    datos: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // 1. Actualizar datos básicos del usuario (Nombre y Email)
+    sqlx::query!(
+        "UPDATE users SET first_name = $1, email = $2 WHERE user_id = $3",
+        datos["nombre"].as_str(),
+        datos["email"].as_str(),
+        u_id
+    ).execute(&mut *tx).await?;
+
+    // 2. Formatear la dirección completa
+    let direccion_formateada = format!(
+        "{} {}, Col. {}, {}, {}, CP {}", 
+        datos["calle"].as_str().unwrap_or(""), 
+        datos["num_ext"].as_str().unwrap_or(""), 
+        datos["colonia"].as_str().unwrap_or(""),
+        datos["municipio"].as_str().unwrap_or(""),
+        datos["estado"].as_str().unwrap_or(""),
+        datos["cp"].as_str().unwrap_or("")
+    );
+
+    // 3. Insertar en patient_addresses (asumiendo que address_id es serial o uuid generado por DB)
+    // Usamos 'Entrega Bot' como etiqueta para identificarla
+    sqlx::query!(
+        r#"
+        INSERT INTO patient_addresses (patient_id, address_label, full_address, is_default)
+        VALUES ($1, $2, $3, $4)
+        "#,
+        p_id,
+        "Entrega Pedido",
+        direccion_formateada,
+        true // La marcamos como default para este envío
+    ).execute(&mut *tx).await?;
+
+    // 4. Actualizar la orden de medicamentos con la dirección y el costo de envío
+    // Buscamos la orden que esté en estatus 'pendiente' o 'solicitado'
+    sqlx::query!(
+        r#"
+        UPDATE medication_orders 
+        SET delivery_address = $1, current_status = 'preparando' 
+        WHERE order_id IN (
+            SELECT order_id FROM orders 
+            WHERE patient_id = $2 AND p_status = 'pendiente'
+        )
+        "#,
+        direccion_formateada,
+        p_id
+    ).execute(&mut *tx).await?;
+
+    // 5. Aplicar el cargo de envío ($20) al total de la orden
+    sqlx::query!(
+        "UPDATE orders SET total_amount = total_amount + 20.00 WHERE patient_id = $1 AND p_status = 'pendiente'",
+        p_id
+    ).execute(&mut *tx).await?;
+
+    tx.commit().await?;
+    Ok(())
 }
