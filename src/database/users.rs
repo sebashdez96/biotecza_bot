@@ -287,3 +287,75 @@ pub async fn finalizar_pedido_con_datos_flow(
     tx.commit().await?;
     Ok(())
 }
+
+pub async fn actualizar_nombre_completo(
+    pool: &PgPool,
+    user_id: &Uuid,
+    first_name: &str,
+    paternal_last_name: &str,
+    maternal_last_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE users 
+        SET first_name = $1, 
+            paternal_last_name = $2, 
+            maternal_last_name = $3 
+        WHERE user_id = $4
+        "#,
+        first_name,
+        paternal_last_name,
+        maternal_last_name,
+        user_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+// En src/database/users.rs
+
+// Función para el estado ValidandoCp
+pub async fn iniciar_direccion_con_cp(
+    pool: &PgPool, 
+    patient_id: &Uuid, 
+    cp: &str
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO patient_addresses (patient_id, postal_code, street, colony, references_text)
+        VALUES ($1, $2, '', '', '')
+        "#,
+        patient_id,
+        cp
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// Función para el estado EsperandoCalle
+pub async fn actualizar_calle_y_obtener_cp(
+    pool: &PgPool, 
+    patient_id: &Uuid, 
+    calle: &str
+) -> Result<String, sqlx::Error> {
+    // Actualizamos el registro más reciente que no tenga colonia
+    // y pedimos que nos regrese el postal_code
+    let rec = sqlx::query!(
+        r#"
+        UPDATE patient_addresses 
+        SET street = $1 
+        WHERE patient_id = $2 AND colony = ''
+        RETURNING postal_code
+        "#,
+        calle,
+        patient_id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    // Devolvemos el CP como un String (o un String vacío si por algo es null)
+    Ok(rec.postal_code.unwrap_or_default())
+}

@@ -115,7 +115,10 @@ pub async fn procesar(pool: &PgPool, telefono: &str, entrada: &str) {
         UserState::ConfirmandoTicket |
         UserState::ValidandoCp => { // <-- ASEGÚRATE DE QUE ESTE ESTÉ AQUÍ
             pharmacy::procesar_farmacia(pool, &telefono, &entrada, estado, &patient_id).await;
-        }, |
+        }, 
+
+        UserState::EsperandoNombreCompleto |
+        UserState::EsperandoCalle |
         UserState::EsperandoDatosFlow => {
             let _ = procesar_usuario(pool, telefono, entrada, estado, &user_id, &patient_id).await;
         },

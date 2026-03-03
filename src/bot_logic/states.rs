@@ -21,7 +21,9 @@ pub enum UserState {
     
     // Usuario / Perfil
     EsperandoDatosFlow,
+    EsperandoNombreCompleto,
     EsperandoReceta,
+    EsperandoCalle,
 }
 
 impl ToString for UserState {
@@ -39,7 +41,9 @@ impl ToString for UserState {
             UserState::EsperandoReceta => "ESPERANDO_RECETA".to_string(),
             UserState::ConfirmandoSeleccion => "CONFIRMANDO_SELECCION".to_string(),
             UserState::AgregandoProductoFinal => "AGREGANDO_PRODUCTO_FINAL".to_string(),
+            UserState::EsperandoNombreCompleto => "ESPERANDO_NOMBRE_COMPLETO".to_string(),
             UserState::ConfirmandoTicket => "CONFIRMANDO_TICKET".to_string(),
+            UserState::EsperandoCalle => "ESPERANDO_CALLE".to_string(),
         }
     }
 }
@@ -60,8 +64,10 @@ impl FromStr for UserState {
             "CONFIRMANDO_TICKET" => Ok(UserState::ConfirmandoTicket),
             "CONFIRMANDO_PEDIDO" => Ok(UserState::ConfirmandoPedido),
             "VALIDANDO_CP" => Ok(UserState::ValidandoCp),
+            "ESPERANDO_NOMBRE_COMPLETO" => Ok(UserState::EsperandoNombreCompleto),
             "ESPERANDO_DATOS_FLOW" => Ok(UserState::EsperandoDatosFlow),
             "ESPERANDO_RECETA" => Ok(UserState::EsperandoReceta),
+            "ESPERANDO_CALLE" => Ok(UserState::EsperandoCalle),
             _ => Err(format!("Estado desconocido: {}", s)),
         }
     }

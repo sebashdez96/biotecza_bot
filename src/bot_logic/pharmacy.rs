@@ -157,11 +157,21 @@ UserState::ConfirmandoTicket => {
 
 UserState::ValidandoCp => {
     let cp = entrada.trim();
-    if let Some(info) = database::obtener_info_por_cp(pool, cp).await {
-        // Enviar el Flow con los datos pre-llenados (Municipio, Estado, Colonias)
-        whatsapp::enviar_flow_envio(telefono, cp, &info).await;
+    
+    // Verificamos si hay cobertura
+    if let Some(_info) = database::obtener_info_por_cp(pool, cp).await {
         
-        database::cambiar_estado(pool, telefono, "ESPERANDO_DATOS_FLOW").await;
+        // OPCIONAL: Aquí deberías guardar el CP temporalmente en algún lado 
+        // para usarlo al final cuando armes la dirección completa.
+        // database::guardar_cp_temporal(pool, telefono, cp).await;
+        
+        let _ = crate::database::users::iniciar_direccion_con_cp(pool, patient_id, cp).await;
+        
+        database::cambiar_estado(pool, telefono, "ESPERANDO_NOMBRE_COMPLETO").await;
+        
+        let msg = "✅ ¡Excelente! Sí tenemos cobertura en tu zona.\n\nPara agendar tu envío, por favor escribe tu *Nombre Completo* (Nombre y apellidos).\n_Nota: Si solo tienes un apellido, pon una 'X' al final._";
+        whatsapp::enviar_texto(telefono, msg).await;
+        
     } else {
         whatsapp::enviar_texto(telefono, "❌ Lo sentimos, aún no tenemos cobertura en ese CP. Intenta con otro o contacta a soporte.").await;
     }
