@@ -181,6 +181,26 @@ pub async fn actualizar_email_usuario(pool: &PgPool, user_id: Uuid, email: &str)
     ).execute(pool).await;
 }
 
+pub async fn actualizar_nombre_temporal(pool: &PgPool, user_id: Uuid, nombre: &str) {
+    let _ = sqlx::query!(
+        "UPDATE users SET first_name = $1 WHERE user_id = $2",
+        format!("TEMP-{}", nombre), user_id
+    ).execute(pool).await;
+}
+
+pub async fn obtener_nombre_temporal(pool: &PgPool, user_id: Uuid) -> Option<String> {
+    let res = sqlx::query!(
+        "SELECT first_name FROM users WHERE user_id = $1",
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+
+    // Si el nombre existe, le quitamos el "TEMP-" para mostrarlo bonito
+    res.first_name.map(|n| n.replace("TEMP-", ""))
+}
+
 #[allow(dead_code)]
 pub async fn actualizar_datos_clinicos(pool: &PgPool, patient_id: Uuid, curp: &str, genero: &str) {
     let _ = sqlx::query!(

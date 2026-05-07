@@ -4,22 +4,43 @@ use super::states::UserState;
 use regex::Regex;
 
 pub async fn enviar_bienvenida(pool: &PgPool, telefono: &str) {
-    crate::database::cambiar_estado(pool, telefono, &UserState::Inicio.to_string()).await;
-
-    // Intentar obtener usuario y personalizar saludo si ya tiene nombre
+    // 1. Buscamos al usuario
     if let Some(u) = crate::database::obtener_usuario_por_telefono(pool, telefono).await {
-        if !u.first_name.trim().is_empty() {
-            let mensaje = format!("¡Hola, {}! Bienvenido a *Biotecza*.\nSelecciona una opción:", u.first_name);
-            whatsapp::enviar_botones(telefono, &mensaje, vec!["Laboratorio", "Medicamentos"]).await;
+        // ¿Ya tiene un nombre confirmado? (No está vacío y no es TEMP)
+        if !u.first_name.trim().is_empty() && !u.first_name.contains("TEMP-") {
+            // USUARIO CONOCIDO: Ir al menú principal directamente
+            crate::database::cambiar_estado(pool, telefono, &UserState::Inicio.to_string()).await;
+            
+            let mensaje = format!("¡Hola, *{}*! Qué gusto saludarte de nuevo en *Biotecza*.\n\n¿En qué podemos apoyarte hoy? 👇😊", u.first_name);
+            whatsapp::enviar_botones(telefono, &mensaje, vec!["🔬 Laboratorio", "💊 Medicamentos"]).await;
             return;
         }
     }
 
-    whatsapp::enviar_botones(
-        telefono,
-        "¡Hola! Bienvenido a *Biotecza*.\nSelecciona una opción:",
-        vec!["Laboratorio", "Medicamentos"]
-    ).await;
+    // USUARIO NUEVO (o sin nombre): Mandarlo al flujo de registro de Andy
+    crate::database::cambiar_estado(pool, telefono, &UserState::Nuevo.to_string()).await;
+    
+    let saludo_nuevo = "Hola, no te había visto por aquí. 👀 Mucho gusto, soy el Asistente virtual de *Biotecza*.\n\n\
+                        ¿Cuál es tu nombre? 👇🏼\n\
+                        _Escribe solo tu nombre_";
+
+    crate::database::cambiar_estado(pool, telefono, &UserState::EsperandoNombre.to_string()).await;
+    
+    whatsapp::enviar_texto(telefono, saludo_nuevo).await;
+}
+pub async fn enviar_menu_principal_con_privacidad(telefono: &str, nombre: &str) {
+    // 1. Enviamos el link de privacidad como un mensaje simple de texto
+    let mensaje_privacidad = format!(
+        "¡Mucho gusto, *{}*! Conoce aquí nuestro Aviso de Privacidad 👇\nhttps://biotecza.com/privacidad",
+        nombre
+    );
+    whatsapp::enviar_texto(telefono, &mensaje_privacidad).await;
+
+    // 2. Inmediatamente enviamos el menú de opciones con botones
+    let mensaje_menu = "¿Qué necesitas hoy? Elige la opción que mejor se adapte a tu solicitud 👇😊";
+    let opciones = vec!["🔬 Laboratorio", "💊 Medicamentos"];
+    
+    whatsapp::enviar_botones(telefono, mensaje_menu, opciones).await;
 }
 
 pub async fn procesar_usuario(

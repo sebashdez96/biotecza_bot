@@ -4,6 +4,10 @@ use std::str::FromStr;
 pub enum UserState {
     // Estados iniciales
     Inicio,
+    MenuPrincipal,
+    Nuevo,            // No registrado
+    EsperandoNombre,  // Le preguntamos el nombre
+    ConfirmandoNombre,// Confirmando si escribió bien su nombre
     
     // Laboratorio
     SeleccionandoExamen,
@@ -30,6 +34,7 @@ impl ToString for UserState {
     fn to_string(&self) -> String {
         match self {
             UserState::Inicio => "INICIO".to_string(),
+            UserState::MenuPrincipal => "MENU_PRINCIPAL".to_string(),
             UserState::SeleccionandoExamen => "SELECCIONANDO_EXAMEN".to_string(),
             UserState::MenuFarmacia => "MENU_FARMACIA".to_string(),
             UserState::EsperandoCategoria => "ESPERANDO_CATEGORIA".to_string(),
@@ -44,6 +49,9 @@ impl ToString for UserState {
             UserState::EsperandoGenero => "ESPERANDO_GENERO".to_string(),
             UserState::EsperandoDireccion => "ESPERANDO_DIRECCION".to_string(),
             UserState::EsperandoReceta => "ESPERANDO_RECETA".to_string(),
+            UserState::Nuevo => "NUEVO".to_string(),
+            UserState::EsperandoNombre => "ESPERANDO_NOMBRE".to_string(),
+            UserState::ConfirmandoNombre => "CONFIRMANDO_NOMBRE".to_string(),
         }
     }
 }
@@ -54,6 +62,7 @@ impl FromStr for UserState {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "INICIO" => Ok(UserState::Inicio),
+            "MENU_PRINCIPAL" => Ok(UserState::MenuPrincipal),
             "SELECCIONANDO_EXAMEN" => Ok(UserState::SeleccionandoExamen),
             "MENU_FARMACIA" => Ok(UserState::MenuFarmacia),
             "ESPERANDO_CATEGORIA" => Ok(UserState::EsperandoCategoria),
@@ -68,6 +77,9 @@ impl FromStr for UserState {
             "ESPERANDO_GENERO" => Ok(UserState::EsperandoGenero),
             "ESPERANDO_DIRECCION" => Ok(UserState::EsperandoDireccion),
             "ESPERANDO_RECETA" => Ok(UserState::EsperandoReceta),
+            "NUEVO"  => Ok(UserState::Nuevo),
+            "ESPERANDO_NOMBRE"  => Ok(UserState::EsperandoNombre),
+            "CONFIRMANDO_NOMBRE"  => Ok(UserState::ConfirmandoNombre),
             _ => Err(format!("Estado desconocido: {}", s)),
         }
     }
